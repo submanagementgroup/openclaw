@@ -449,6 +449,14 @@ export type GatewayClientOptions = {
   minProtocol?: number;
   maxProtocol?: number;
   tlsFingerprint?: string;
+  /**
+   * Extra HTTP headers sent with the initial WebSocket upgrade. Useful when
+   * the connection traverses an edge proxy that requires a non-empty
+   * `User-Agent` (e.g. AWS WAF), or for tagging backend-to-backend bridges
+   * with an identifiable agent string. Keys are case-insensitive per
+   * RFC 7230. Does not affect the in-band `connect` frame's `client` block.
+   */
+  webSocketHeaders?: Record<string, string>;
   onEvent?: (evt: EventFrame) => void;
   onHelloOk?: (hello: HelloOk) => void;
   onConnectError?: (err: Error) => void;
@@ -634,6 +642,7 @@ export class GatewayClient {
     this.deps.beforeConnect();
     const wsOptions: FingerprintCheckingClientOptions = {
       maxPayload: 25 * 1024 * 1024,
+      ...(this.opts.webSocketHeaders ? { headers: { ...this.opts.webSocketHeaders } } : {}),
     };
     if (url.startsWith("wss://") && this.opts.tlsFingerprint) {
       wsOptions.rejectUnauthorized = false;

@@ -25,6 +25,13 @@ export function registerAcpCli(program: Command) {
     .option("--reset-session", "Reset the session key before first use", false)
     .option("--no-prefix-cwd", "Do not prefix prompts with the working directory")
     .option("--provenance <mode>", "ACP provenance mode: off, meta, or meta+receipt")
+    .option(
+      "--bridge-mode",
+      "Run as a backend-to-backend ACP bridge: send no device identity " +
+        "and present as an operator-UI client. Requires the target gateway " +
+        "to have gateway.controlUi.dangerouslyDisableDeviceAuth set to true.",
+      false,
+    )
     .option("-v, --verbose", "Verbose logging to stderr", false)
     .addHelpText(
       "after",
@@ -47,6 +54,7 @@ export function registerAcpCli(program: Command) {
           resetSession: Boolean(opts.resetSession),
           prefixCwd: opts.prefixCwd !== false,
           provenanceMode,
+          bridgeMode: Boolean(opts.bridgeMode),
           verbose: Boolean(opts.verbose),
         });
       } catch (err) {

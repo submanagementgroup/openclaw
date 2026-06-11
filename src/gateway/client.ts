@@ -150,6 +150,13 @@ export type GatewayClientOptions = {
   minProtocol?: number;
   maxProtocol?: number;
   tlsFingerprint?: string;
+  /**
+   * Extra HTTP headers sent with the initial WebSocket upgrade. Forwarded
+   * verbatim to the underlying gateway-client. Useful when the connection
+   * traverses an edge proxy that requires a non-empty `User-Agent`, or for
+   * tagging backend-to-backend bridges with an identifiable agent string.
+   */
+  webSocketHeaders?: Record<string, string>;
   onEvent?: (evt: EventFrame) => void;
   onHelloOk?: (hello: HelloOk) => void;
   onConnectError?: (err: Error) => void;

@@ -45,6 +45,25 @@ export type AcpServerOptions = {
     windowMs?: number;
   };
   verbose?: boolean;
+  /**
+   * Run as a backend-to-backend ACP bridge instead of a personal IDE/CLI
+   * client. When set:
+   *   - the connect frame carries no `device` field (no per-process
+   *     ed25519 identity is created or persisted)
+   *   - the gateway client identifies as a control-UI (TUI) client so the
+   *     server's operator-UI bypass path is reachable, but the
+   *     browser-origin enforcement path is not
+   *   - the underlying WebSocket sends a recognisable `User-Agent` so the
+   *     connection isn't blocked by edge protections (e.g. AWS WAF) that
+   *     reject empty UA strings
+   *
+   * The target gateway must already opt in to operator-UI-without-device
+   * via `gateway.controlUi.dangerouslyDisableDeviceAuth=true`. Bridge mode
+   * does not introduce a new bypass — it surfaces the existing one as a
+   * documented client-side flag so downstream consumers don't have to
+   * hand-patch the compiled `client-*.js` / `acp-cli-*.js` bundles.
+   */
+  bridgeMode?: boolean;
 };
 
 export type SessionAcpIdentitySource = "ensure" | "status" | "event";

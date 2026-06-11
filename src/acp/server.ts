@@ -20,6 +20,7 @@ import { startGatewayClientWhenEventLoopReady } from "../gateway/client-start-re
 import { GatewayClient } from "../gateway/client.js";
 import { isMainModule } from "../infra/is-main.js";
 import { routeLogsToStderr } from "../logging/console.js";
+import { VERSION } from "../version.js";
 import {
   createSqliteAcpEventLedger,
   migrateFileAcpEventLedgerToSqlite,
@@ -79,16 +80,36 @@ export async function serveAcpGateway(opts: AcpServerOptions = {}): Promise<void
     onGatewayReadyReject(err instanceof Error ? err : new Error(String(err)));
   };
 
+  // Bridge mode rewires `openclaw acp` for backend-to-backend use:
+  //   - no device identity in the connect frame (would otherwise create and
+  //     persist a per-process ed25519 keypair under $OPENCLAW_HOME)
+  //   - present as a control-UI (TUI) client so the server's operator-UI
+  //     bypass is reachable, but the browser-origin enforcement isn't
+  //   - send a recognisable User-Agent so edge filters that reject empty UA
+  //     (e.g. AWS WAF managed rules) let the WS upgrade through
+  // The bypass is gated server-side by gateway.controlUi.dangerouslyDisable
+  // DeviceAuth, which operators must already have opted into; this flag
+  // does not introduce a new trust model, it just exposes the existing one
+  // as a documented CLI surface so downstream consumers don't have to
+  // patch the compiled bundles.
+  const bridgeMode = opts.bridgeMode === true;
+
   const gateway = new GatewayClient({
     url: bootstrap.url,
     token: bootstrap.auth.token,
     password: bootstrap.auth.password,
     preauthHandshakeTimeoutMs: bootstrap.preauthHandshakeTimeoutMs,
-    clientName: GATEWAY_CLIENT_NAMES.CLI,
+    clientName: bridgeMode ? GATEWAY_CLIENT_NAMES.TUI : GATEWAY_CLIENT_NAMES.CLI,
     clientDisplayName: "ACP",
     clientVersion: "acp",
     mode: GATEWAY_CLIENT_MODES.CLI,
     caps: [GATEWAY_CLIENT_CAPS.TOOL_EVENTS],
+    ...(bridgeMode
+      ? {
+          deviceIdentity: null,
+          webSocketHeaders: { "user-agent": `openclaw-acp-bridge/${VERSION}` },
+        }
+      : {}),
     onEvent: (evt) => {
       void agent?.handleGatewayEvent(evt);
     },
@@ -269,6 +290,10 @@ function parseArgs(args: string[]): AcpServerOptions {
       opts.verbose = true;
       continue;
     }
+    if (arg === "--bridge-mode") {
+      opts.bridgeMode = true;
+      continue;
+    }
     if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -310,6 +335,11 @@ Options:
   --reset-session         Reset the session key before first use
   --no-prefix-cwd         Do not prefix prompts with the working directory
   --provenance <mode>     ACP provenance mode: off, meta, or meta+receipt
+  --bridge-mode           Run as a backend-to-backend ACP bridge: send no
+                          device identity and present as an operator-UI
+                          client. Requires the target gateway to have
+                          gateway.controlUi.dangerouslyDisableDeviceAuth
+                          set to true.
   --verbose, -v           Verbose logging to stderr
   --help, -h              Show this help message
 `);
