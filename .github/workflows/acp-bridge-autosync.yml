@@ -1,0 +1,188 @@
+# Auto-sync the ACP --bridge-mode patch onto the latest upstream OpenClaw release.
+#
+# Background
+#   `feat/acp-bridge-mode` is this fork's only delta from upstream openclaw/openclaw:
+#   a single commit ("feat(acp): add --bridge-mode ...") layered on top of a stable
+#   release tag. ClawdBase builds from this branch (CLAWDBASE_OPENCLAW_SOURCE_REF).
+#   Keeping it current = re-applying that one commit onto each new stable tag.
+#
+# This is intentionally the ONLY workflow on this fork. The 55 inherited upstream
+# workflows (CI, CodeQL, macOS/Windows builds, live e2e, ...) were removed from
+# `main` so that enabling Actions on the fork doesn't start burning Actions minutes
+# on builds we never use. We don't run upstream's CI; ClawdBase builds the image
+# itself from this branch.
+#
+# What it does (daily + on demand)
+#   - Finds the newest STABLE upstream tag (vX.Y.Z, no alpha/beta/rc) and compares
+#     it to the tag `feat/acp-bridge-mode` currently sits on (`git describe`).
+#   - If newer, cherry-picks our patch onto it:
+#       * clean    -> pushes preview branch `auto/rebase/<tag>` and opens an issue.
+#                     Apply by re-running this workflow with `apply = true`
+#                     (or set repo variable ACP_AUTOSYNC_AUTO_APPLY=true for hands-off).
+#       * conflict -> opens an issue with the exact manual rebase commands.
+#   - "Apply" force-updates `feat/acp-bridge-mode`; the next ClawdBase build picks it up.
+#
+# Cost: a no-op run (no new release) is ~30s of git. Tags are fetched directly from
+# upstream at runtime, so no separate tag-mirroring workflow is needed.
+#
+# Deliberately PR-free: a PR based on `feat/acp-bridge-mode` would trigger that
+# branch's inherited `pull_request` CI. Issues + a preview branch avoid that.
+
+name: ACP bridge auto-sync
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily 06:17 UTC
+  workflow_dispatch:
+    inputs:
+      target_tag:
+        description: "Upstream tag to target (default: latest stable vX.Y.Z)"
+        required: false
+        default: ""
+      apply:
+        description: "Force-update feat/acp-bridge-mode to the rebased commit"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: acp-bridge-autosync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  PATCH_BRANCH: feat/acp-bridge-mode
+  UPSTREAM_URL: https://github.com/openclaw/openclaw.git
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "clawdbase-autosync[bot]"
+          git config user.email "clawdbase-autosync@users.noreply.github.com"
+
+      - name: Fetch upstream tags and patch branch
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch --quiet --tags upstream
+          git fetch --quiet origin "$PATCH_BRANCH":"refs/remotes/origin/$PATCH_BRANCH"
+
+      - name: Resolve target tag and current base
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.target_tag }}" ]; then
+            NEW="${{ github.event.inputs.target_tag }}"
+          else
+            NEW="$(git tag -l 'v*' | grep -vE 'alpha|beta|rc' | sort -V | tail -1)"
+          fi
+          BASE="$(git describe --tags --abbrev=0 "origin/$PATCH_BRANCH")"
+          echo "new=$NEW"   >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          if [ "$NEW" = "$BASE" ]; then echo "uptodate=true" >> "$GITHUB_OUTPUT"; else echo "uptodate=false" >> "$GITHUB_OUTPUT"; fi
+          {
+            echo "## ACP bridge auto-sync"
+            echo "- current base: \`$BASE\`"
+            echo "- latest stable: \`$NEW\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Up to date
+        if: steps.resolve.outputs.uptodate == 'true'
+        run: echo "Nothing to do — feat/acp-bridge-mode already on ${{ steps.resolve.outputs.base }}." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cherry-pick patch onto new tag
+        id: pick
+        if: steps.resolve.outputs.uptodate == 'false'
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.resolve.outputs.new }}"
+          BASE="${{ steps.resolve.outputs.base }}"
+          git checkout -B "auto/rebase/$NEW" "refs/tags/$NEW"
+          if git cherry-pick "$BASE..origin/$PATCH_BRANCH"; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            git cherry-pick --abort || true
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide whether to apply
+        id: decide
+        if: steps.pick.outputs.clean == 'true'
+        run: |
+          if [ "${{ github.event.inputs.apply }}" = "true" ] || [ "${{ vars.ACP_AUTOSYNC_AUTO_APPLY }}" = "true" ]; then
+            echo "apply=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "apply=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply — force-update patch branch
+        if: steps.decide.outputs.apply == 'true'
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.resolve.outputs.new }}"
+          EXPECT="$(git rev-parse "origin/$PATCH_BRANCH")"
+          git push --force-with-lease="$PATCH_BRANCH:$EXPECT" origin "HEAD:refs/heads/$PATCH_BRANCH"
+          git push origin --delete "auto/rebase/$NEW" 2>/dev/null || true
+          echo "Applied: \`$PATCH_BRANCH\` now on \`$NEW\` @ \`$(git rev-parse HEAD)\`. Next ClawdBase build will pick it up." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify — push preview + open issue (clean, not applied)
+        if: steps.pick.outputs.clean == 'true' && steps.decide.outputs.apply != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.resolve.outputs.new }}"
+          BASE="${{ steps.resolve.outputs.base }}"
+          SHA="${{ steps.pick.outputs.sha }}"
+          git push --force origin "auto/rebase/$NEW"
+          TITLE="Update available: --bridge-mode -> $NEW"
+          BODY=$(printf '%s\n' \
+            "Upstream released **$NEW** (current base \`$BASE\`). Our ACP \`--bridge-mode\` patch cherry-picks **cleanly** onto it." \
+            "" \
+            "Preview: branch \`auto/rebase/$NEW\` @ \`$SHA\` (review the diff vs \`$NEW\`)." \
+            "" \
+            "**To apply**, run the [ACP bridge auto-sync](../../actions/workflows/acp-bridge-autosync.yml) workflow with **apply = true**." \
+            "That force-updates \`$PATCH_BRANCH\`; the next ClawdBase build picks it up." \
+            "" \
+            "_A clean cherry-pick does not guarantee a clean compile (upstream may move files). Worth a quick \`pnpm tsgo:core\` before trusting it. To go fully hands-off, set repo variable \`ACP_AUTOSYNC_AUTO_APPLY=true\`._")
+          if gh issue list --search "$TITLE in:title state:open" --json number -q '.[0].number' | grep -q .; then
+            echo "Issue already open for $NEW." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+            echo "Opened an issue for $NEW." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Conflict — open issue
+        if: steps.pick.outputs.clean == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.resolve.outputs.new }}"
+          BASE="${{ steps.resolve.outputs.base }}"
+          TITLE="Manual rebase needed: --bridge-mode onto $NEW"
+          BODY=$(printf '%s\n' \
+            "The automated cherry-pick of the ACP \`--bridge-mode\` patch onto \`$NEW\` hit conflicts. Rebase manually:" \
+            '```bash' \
+            "git fetch --tags upstream && git fetch origin $PATCH_BRANCH" \
+            "git checkout -B $PATCH_BRANCH refs/tags/$NEW" \
+            "git cherry-pick $BASE..origin/$PATCH_BRANCH   # resolve conflicts" \
+            "git push --force-with-lease origin $PATCH_BRANCH" \
+            '```')
+          if gh issue list --search "$TITLE in:title state:open" --json number -q '.[0].number' | grep -q .; then
+            echo "Conflict issue already open for $NEW." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi
